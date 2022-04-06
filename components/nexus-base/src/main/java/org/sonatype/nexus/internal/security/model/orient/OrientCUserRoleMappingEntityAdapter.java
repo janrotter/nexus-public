@@ -62,12 +62,19 @@ public class OrientCUserRoleMappingEntityAdapter
       .property(P_USER_ID)
       .property(P_SOURCE)
       .build();
+  
+  private static final String I_USER_ID_SOURCE_CI = new OIndexNameBuilder()
+      .type(DB_CLASS)
+      .property(P_USER_ID)
+      .property(P_SOURCE)
+      .caseInsensitive()
+      .build();
 
   private final ReadEntityByPropertyAction<OrientCUserRoleMapping> read =
       new ReadEntityByPropertyAction<>(this, P_USER_ID, P_SOURCE);
 
   private final ReadEntityByPropertyAction<OrientCUserRoleMapping> readIgnoreCase =
-      new ReadEntityByPropertyAction<>(this, P_USER_ID_LOWERCASE, P_SOURCE);
+      new ReadEntityByPropertyAction<>(this, P_USER_ID, P_SOURCE); //FIXME: this is not ignoring the case, but uses the index
 
   private final DeleteEntityByPropertyAction delete = new DeleteEntityByPropertyAction(this, P_USER_ID, P_SOURCE);
 
@@ -93,6 +100,8 @@ public class OrientCUserRoleMappingEntityAdapter
     type.createProperty(P_ROLES, OType.EMBEDDEDSET);
 
     type.createIndex(I_USER_ID_SOURCE, INDEX_TYPE.UNIQUE, P_USER_ID, P_SOURCE);
+    //This index obviously doesn't work as expected, but it is here to ensure that the class file was properly replaced
+    type.createIndex(I_USER_ID_SOURCE_CI, INDEX_TYPE.UNIQUE, P_USER_ID, P_SOURCE);
   }
 
   @Override
