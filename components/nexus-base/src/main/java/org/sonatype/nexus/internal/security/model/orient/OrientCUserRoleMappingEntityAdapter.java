@@ -12,29 +12,69 @@
  */
 package org.sonatype.nexus.internal.security.model.orient;
 
-import java.util.Set;
-
-import javax.annotation.Nullable;
-import javax.inject.Named;
-import javax.inject.Singleton;
-
-import org.sonatype.nexus.orient.OClassNameBuilder;
-import org.sonatype.nexus.orient.OIndexNameBuilder;
-import org.sonatype.nexus.orient.entity.IterableEntityAdapter;
-import org.sonatype.nexus.orient.entity.action.DeleteEntityByPropertyAction;
-import org.sonatype.nexus.orient.entity.action.ReadEntityByPropertyAction;
-import org.sonatype.nexus.orient.entity.action.UpdateEntityByPropertyAction;
-import org.sonatype.nexus.security.config.CUserRoleMapping;
-
 import com.google.common.collect.Sets;
 import com.orientechnologies.orient.core.db.document.ODatabaseDocumentTx;
 import com.orientechnologies.orient.core.metadata.schema.OClass;
 import com.orientechnologies.orient.core.metadata.schema.OClass.INDEX_TYPE;
 import com.orientechnologies.orient.core.metadata.schema.OType;
 import com.orientechnologies.orient.core.record.impl.ODocument;
+import com.orientechnologies.orient.core.sql.query.OSQLSynchQuery;
+import org.sonatype.goodies.common.ComponentSupport;
+import org.sonatype.nexus.common.entity.Entity;
+import org.sonatype.nexus.orient.OClassNameBuilder;
+import org.sonatype.nexus.orient.OIndexBuilder;
+import org.sonatype.nexus.orient.OIndexNameBuilder;
+import org.sonatype.nexus.orient.entity.EntityAdapter;
+import org.sonatype.nexus.orient.entity.IterableEntityAdapter;
+import org.sonatype.nexus.orient.entity.action.DeleteEntityByPropertyAction;
+import org.sonatype.nexus.orient.entity.action.ReadEntityByPropertyAction;
+import org.sonatype.nexus.orient.entity.action.UpdateEntityByPropertyAction;
+import org.sonatype.nexus.security.config.CUserRoleMapping;
 
+import javax.annotation.Nullable;
+import javax.inject.Named;
+import javax.inject.Singleton;
+import java.util.List;
+import java.util.Set;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static org.sonatype.nexus.security.config.SecuritySourceUtil.isCaseInsensitiveSource;
 
+class ReadEntityFromIndex<T extends Entity>
+        extends ComponentSupport
+{
+  private final EntityAdapter<T> adapter;
+
+  private final String query;
+
+  public ReadEntityFromIndex(final EntityAdapter<T> adapter, final String indexName, final String... properties) {
+    this.adapter = checkNotNull(adapter);
+    this.query = String.format("select expand(rid) from index:%s where key=[?,?]", indexName);
+  }
+
+  @Nullable
+  public T execute(final ODatabaseDocumentTx db, final Object... values) {
+    checkNotNull(db);
+//    log.error("Query " + this.query + " " + values[0] + " " + values[1]);
+    checkArgument(values.length > 0);
+
+    List<ODocument> results = db.command(new OSQLSynchQuery<>(query))
+            .execute(values);
+
+    if (results.isEmpty()) {
+      return null;
+    }
+    return adapter.readEntity(results.get(0));
+  }
+
+  @Override
+  public String toString() {
+    return getClass().getSimpleName() + "{" +
+            "query='" + query + '\'' +
+            '}';
+  }
+}
 /**
  * {@link CUserRoleMapping} entity adapter.
  *
@@ -73,8 +113,8 @@ public class OrientCUserRoleMappingEntityAdapter
   private final ReadEntityByPropertyAction<OrientCUserRoleMapping> read =
       new ReadEntityByPropertyAction<>(this, P_USER_ID, P_SOURCE);
 
-  private final ReadEntityByPropertyAction<OrientCUserRoleMapping> readIgnoreCase =
-      new ReadEntityByPropertyAction<>(this, P_USER_ID, P_SOURCE); //FIXME: this is not ignoring the case, but uses the index
+  private final ReadEntityFromIndex<OrientCUserRoleMapping> readIgnoreCase =
+      new ReadEntityFromIndex<>(this, I_USER_ID_SOURCE_CI, P_USER_ID, P_SOURCE);
 
   private final DeleteEntityByPropertyAction delete = new DeleteEntityByPropertyAction(this, P_USER_ID, P_SOURCE);
 
@@ -92,16 +132,25 @@ public class OrientCUserRoleMappingEntityAdapter
   }
 
   @Override
-  protected void defineType(final OClass type) {
+  protected void defineType(final ODatabaseDocumentTx db, final OClass type) {
+    log.info("Applying a fix for user_role_mapping.");
     type.createProperty(P_USER_ID, OType.STRING)
-        .setNotNull(true);
+            .setNotNull(true);
     type.createProperty(P_SOURCE, OType.STRING)
-        .setNotNull(true);
+            .setNotNull(true);
     type.createProperty(P_ROLES, OType.EMBEDDEDSET);
 
     type.createIndex(I_USER_ID_SOURCE, INDEX_TYPE.UNIQUE, P_USER_ID, P_SOURCE);
-    //This index obviously doesn't work as expected, but it is here to ensure that the class file was properly replaced
-    type.createIndex(I_USER_ID_SOURCE_CI, INDEX_TYPE.UNIQUE, P_USER_ID, P_SOURCE);
+
+    new OIndexBuilder(type, I_USER_ID_SOURCE_CI, INDEX_TYPE.UNIQUE)
+            .property(P_USER_ID, OType.STRING)
+            .property(P_SOURCE, OType.STRING)
+            .caseInsensitive()
+            .build(db);
+  }
+
+  @Override
+  protected void defineType(final OClass type) {
   }
 
   @Override
