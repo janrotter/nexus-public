@@ -33,6 +33,7 @@ import org.sonatype.nexus.common.event.EventAware;
 import org.sonatype.nexus.common.stateguard.Guarded;
 import org.sonatype.nexus.common.stateguard.StateGuardLifecycleSupport;
 import org.sonatype.nexus.datastore.api.DuplicateKeyException;
+import org.sonatype.nexus.distributed.event.service.api.common.RoleConfigurationEvent;
 import org.sonatype.nexus.distributed.event.service.api.common.SelectorConfigurationChangedEvent;
 import org.sonatype.nexus.repository.security.RepositoryContentSelectorPrivilegeDescriptor;
 import org.sonatype.nexus.repository.security.RepositorySelector;
@@ -42,6 +43,7 @@ import org.sonatype.nexus.security.authz.AuthorizationManager;
 import org.sonatype.nexus.security.authz.NoSuchAuthorizationManagerException;
 import org.sonatype.nexus.security.privilege.Privilege;
 import org.sonatype.nexus.security.role.Role;
+import org.sonatype.nexus.security.role.RoleEvent;
 import org.sonatype.nexus.security.role.RoleIdentifier;
 import org.sonatype.nexus.security.user.User;
 import org.sonatype.nexus.security.user.UserManager;
@@ -84,6 +86,8 @@ public class SelectorManagerImpl
 {
   private static final SoftReference<List<SelectorConfiguration>> EMPTY_CACHE = new SoftReference<>(null);
 
+  private static final SoftReference<Map<String, Role>> EMPTY_ROLES_CACHE = new SoftReference<>(null);
+
   private final SelectorConfigurationStore store;
 
   private final SecuritySystem securitySystem;
@@ -91,6 +95,10 @@ public class SelectorManagerImpl
   private final LoadingCache<SelectorConfiguration, Selector> selectorCache;
 
   private volatile SoftReference<List<SelectorConfiguration>> cachedBrowseResult = EMPTY_CACHE;
+
+  private volatile SoftReference<Map<String, Role>> rolesMapCache = EMPTY_ROLES_CACHE;
+
+  private final Object rolesMapCacheLock = new Object();
 
   @Inject
   public SelectorManagerImpl(final SelectorConfigurationStore store,
@@ -214,6 +222,18 @@ public class SelectorManagerImpl
     selectorCache.invalidateAll();
   }
 
+  @Subscribe
+  public void on(final RoleConfigurationEvent event) {
+    log.info("Role configuration has changed {} on a remote node. Invalidate the cache.", event.getEventType());
+    rolesMapCache = EMPTY_ROLES_CACHE;
+  }
+
+  @Subscribe
+  public void on(final RoleEvent event) {
+    log.debug("Role configuration has changed {}. Invalidate the cache.", event.toString());
+    rolesMapCache = EMPTY_ROLES_CACHE;
+  }
+
   @Override
   @Guarded(by = STARTED)
   public boolean evaluate(final SelectorConfiguration selectorConfiguration, final VariableSource variableSource)
@@ -325,25 +345,44 @@ public class SelectorManagerImpl
     return isMatchingFormat || isMatchingRepository;
   }
 
+  private Map<String, Role> getRolesMap()
+  {
+    Map<String, Role> result;
+
+    // double-checked lock to minimize caching attempts
+    if ((result = rolesMapCache.get()) == null) {
+      synchronized (rolesMapCacheLock) {
+        if ((result = rolesMapCache.get()) == null) {
+          try {
+            log.debug("List all roles from the default user manager.");
+            result = securitySystem.listRoles(UserManager.DEFAULT_SOURCE).stream()
+                    .collect(Collectors.toMap(Role::getRoleId, Function.identity()));
+          }
+          catch (NoSuchAuthorizationManagerException e) {
+            // This should never happen in practice
+            log.error("Missing default user manager", e);
+            throw new RuntimeException(e);
+          }
+          // maintain this result in memory-sensitive cache
+          rolesMapCache = new SoftReference<>(result);
+        }
+      }
+    }
+
+    return result;
+  }
+
   private List<Role> getRoles(
       final List<String> roleIds,
       final AuthorizationManager authorizationManager)
   {
-    try {
-      // Remote roles can't contribute privileges, or have nested roles.
-      Map<String, Role> roleMap = securitySystem.listRoles(UserManager.DEFAULT_SOURCE).stream()
-          .collect(Collectors.toMap(Role::getRoleId, Function.identity()));
+    // Remote roles can't contribute privileges, or have nested roles.
+    Map<String, Role> roleMap = getRolesMap();
 
-      Set<String> results = new HashSet<>();
-      roleIds.forEach(roleId -> traverseRoleTree(roleId, roleMap, results));
-      return results.stream().map(roleMap::get)
-          .collect(Collectors.toList());
-    }
-    catch (NoSuchAuthorizationManagerException e) {
-      // This should never happen in practice
-      log.error("Missing default user manager", e);
-      throw new RuntimeException(e);
-    }
+    Set<String> results = new HashSet<>();
+    roleIds.forEach(roleId -> traverseRoleTree(roleId, roleMap, results));
+    return results.stream().map(roleMap::get)
+        .collect(Collectors.toList());
   }
 
   private void traverseRoleTree(final String roleId, final Map<String, Role> roleMap, final Set<String> results) {
